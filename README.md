@@ -1,4 +1,4 @@
-# 🚀 SENN – Self-Evolving Neural Network **Automatic CNN Architecture Search via Evolutionary Intelligence**
+# 🚀 SENN – Self-Evolving Neural Network
 
 ## 📌 Overview
 
