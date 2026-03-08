@@ -1,0 +1,28 @@
+# Environment
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Dataset files
+data/cifar-10-batches-py/
+data/*.tar.gz
+
+# Outputs and Models
+outputs/*
+!outputs/.gitkeep
+models/*
+!models/.gitkeep
