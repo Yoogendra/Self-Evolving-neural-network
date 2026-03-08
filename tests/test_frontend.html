@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SENN Connection Test</title>
+</head>
+<body>
+    <h1>SENN Backend Connection Test</h1>
+    <button onclick="testStatus()">Test Status</button>
+    <button onclick="testStart()">Test Start</button>
+    <button onclick="testPause()">Test Pause</button>
+    <button onclick="testReset()">Test Reset</button>
+    <div id="results"></div>
+
+    <script>
+        async function testStatus() {
+            try {
+                const response = await fetch('http://127.0.0.1:8000/status');
+                const data = await response.json();
+                document.getElementById('results').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+            } catch (error) {
+                document.getElementById('results').innerHTML = '<p style="color: red;">Error: ' + error.message + '</p>';
+            }
+        }
+
+        async function testStart() {
+            try {
+                const response = await fetch('http://127.0.0.1:8000/start', { method: 'POST' });
+                const data = await response.json();
+                document.getElementById('results').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+            } catch (error) {
+                document.getElementById('results').innerHTML = '<p style="color: red;">Error: ' + error.message + '</p>';
+            }
+        }
+
+        async function testPause() {
+            try {
+                const response = await fetch('http://127.0.0.1:8000/pause', { method: 'POST' });
+                const data = await response.json();
+                document.getElementById('results').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+            } catch (error) {
+                document.getElementById('results').innerHTML = '<p style="color: red;">Error: ' + error.message + '</p>';
+            }
+        }
+
+        async function testReset() {
+            try {
+                const response = await fetch('http://127.0.0.1:8000/reset', { method: 'POST' });
+                const data = await response.json();
+                document.getElementById('results').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+            } catch (error) {
+                document.getElementById('results').innerHTML = '<p style="color: red;">Error: ' + error.message + '</p>';
+            }
+        }
+    </script>
+</body>
+</html>
