@@ -1,0 +1,500 @@
+================================================================================
+SENN PROJECT: COMPLETE LOG OF CHANGES, REASONS, AND IMPACT
+================================================================================
+(This document is for copy-paste elsewhere. It describes every change made,
+ why it was done, and what impact it has. Nothing is omitted.)
+
+--------------------------------------------------------------------------------
+1. DETERMINISM (REPRODUCIBILITY)
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- models/model_space.py
+  - random_genome() now accepts an optional argument: rng: Optional[random.Random] = None.
+  - When rng is provided, all random choices (num_blocks, out_channels, kernel_size,
+    activation, batchnorm, dropout, pooling, head options, lr, weight_decay) use
+    rng.randint(), rng.choice(), rng.uniform() instead of the global random module.
+  - When rng is None, behavior is unchanged (uses global random).
+
+- evolution/evolve.py
+  - init_population() signature changed from (P, num_classes) to
+    (P, num_classes, rng, seed_dnas=None).
+  - It now calls random_genome(rng=rng) for each random individual, so the initial
+    population is fully determined by the provided RNG.
+  - evolve() creates rng = random.Random(seed) at the start (seed from cfg.seed)
+    and passes rng to init_population(). Thus the entire evolution (initial population
+    + mutation choices + parent selection) uses the same seeded RNG.
+
+- main.py
+  - At the start of main(), seed is read from environment: seed = int(os.environ.get("SENN_SEED", cfg.seed)).
+  - set_seed(seed) and cfg.seed = seed are then applied so that both Python/NumPy/Torch
+    and the evolution RNG use the same seed when SENN_SEED is set.
+
+WHY IT WAS DONE
+- So that running with the same seed and same config produces exactly the same best
+  architecture and metrics. Without this, the initial population used global random
+  (which could be affected by other code or by running order), so reproducibility
+  was not guaranteed across runs.
+
+IMPACT
+- Same seed + same config => identical evolution (same best_architecture.json,
+  same arch_id). Essential for papers (reproducible results) and for debugging.
+- Multi-seed scripts can set SENN_SEED per run to get different but reproducible
+  runs (e.g. seeds 42, 123, 456 for mean ± std).
+
+--------------------------------------------------------------------------------
+2. CONFIG: ABLATION FLAGS (PRUNING AND PARETO)
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- config.py
+  - Added three new fields:
+    - use_pruning: bool = True
+    - pruning_percentage: float = 0.1
+    - use_pareto: bool = True  # If False, use fitness-only top-k selection
+
+- evolution/evolve.py
+  - Before the evolution loop: reads use_pruning, use_pareto, pruning_pct from
+    config (with getattr defaults for backward compatibility).
+  - When building and evaluating each candidate:
+    - If use_pruning is False: the model is built from DNA but prune_model() is
+      not called; the "validation accuracy after pruning" print and pre-train
+      evaluation of the pruned model are skipped.
+    - If use_pruning is True: behavior is as before (prune_model with
+      pruning_percentage from config, then optional eval print).
+  - When selecting survivors after each generation:
+    - If use_pareto is True: candidates are built, pareto_front() and
+      nsga2_select(candidates, k=elite_k) are used to choose elites (unchanged).
+    - If use_pareto is False: elites are the top elite_k individuals by
+      fitness only (sorted by fitness descending, take first elite_k). No
+      Pareto or crowding distance.
+
+WHY IT WAS DONE
+- To support ablation studies: (1) "With vs without pruning during search" and
+  (2) "Pareto/NSGA-II vs simple fitness-based selection". This is standard in
+  NAS papers to show which components actually drive performance.
+
+IMPACT
+- Researchers can set use_pruning=False or use_pareto=False in config (or later
+  via CLI/env) and re-run evolution to compare metrics. No code change required
+  for ablations.
+
+--------------------------------------------------------------------------------
+3. SEARCH COST TRACKING
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- evolution/evolve.py
+  - At the start of the evolution loop: search_start_time = time.perf_counter()
+    and total_archs_evaluated = 0.
+  - After each successfully evaluated architecture (after metrics are computed
+    and logged): total_archs_evaluated += 1.
+  - After the loop (before writing best_architecture.json): computes
+    search_elapsed = time.perf_counter() - search_start_time and writes
+    run_dir/search_cost.json with:
+    - total_architectures_evaluated
+    - search_wall_time_seconds (rounded to 2 decimals)
+    - generations, population_size, seed
+    - use_pruning, use_pareto
+  - A one-line print: "Search cost: N archs, X.Xs wall time".
+
+WHY IT WAS DONE
+- NAS papers routinely report search cost: how many architectures were evaluated
+  and how much wall-clock (or GPU) time was used. This allows comparison with
+  other methods (e.g. DARTS, ENAS) on efficiency of search.
+
+IMPACT
+- Every run produces search_cost.json. Users can report "SENN evaluated K
+  architectures in T seconds" in papers or reports.
+
+--------------------------------------------------------------------------------
+4. FINAL TRAINING TO CONVERGENCE (OPTION B)
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- evaluation/train_eval.py
+  - Added get_cosine_scheduler(optimizer, num_training_steps, warmup_steps=0):
+    returns a LambdaLR that does linear warmup for warmup_steps then cosine
+    decay down to 0.5 * initial LR. Steps are per-batch.
+  - Added train_epochs_cosine(model, train_loader, val_loader, device,
+    num_epochs, lr=1e-3, weight_decay=1e-4, warmup_epochs=5, log_every=10):
+    - Uses AdamW and the cosine scheduler (warmup_epochs * len(train_loader) for
+      warmup, num_epochs * len(train_loader) total steps).
+    - Trains for num_epochs, logs train loss/acc and val acc every log_every
+      epochs, tracks best_val_acc, returns best_val_acc.
+
+- scripts/train_best_to_convergence.py (NEW FILE)
+  - CLI: --run_dir (required), --epochs (default 200), --seed (default 42),
+    --no_cuda, --out_dir (optional; default is run_dir).
+  - Loads run_dir/best_architecture.json, builds model via build_model_from_dna(dna).
+  - Does NOT apply pruning (full model for final evaluation).
+  - Calls train_epochs_cosine() with config epochs (default 200), lr from DNA or
+    1e-3, weight_decay from config.
+  - Evaluates on test set via evaluate(), computes param_count and flops via
+    count_trainable_params and estimate_flops_conv_linear.
+  - Writes run_dir/final_metrics.json: arch_id, seed, epochs, best_val_accuracy,
+    test_accuracy, param_count, flops.
+  - Saves run_dir/best_model_trained_to_convergence.pth (state_dict).
+  - Prints final test accuracy and paths.
+
+WHY IT WAS DONE
+- The accuracy reported during evolution is only after 2 (or few) training epochs,
+  which is not the true potential of the architecture. Standard practice in NAS
+  is to take the best architecture and train it to convergence (e.g. 200 epochs)
+  with a proper schedule (cosine) and then report test accuracy. This script
+  provides that "Option B" so that reported numbers are comparable to other
+  papers and reflect full training. Pruning is not applied here so the metric
+  is "best architecture at full capacity"; pruning remains used during search.
+
+IMPACT
+- Users get a second way to evaluate the best model: Option B (train to
+  convergence, cosine LR, no pruning) typically gives higher and more comparable
+  test accuracy than Option A (evaluate_best_model.py: 40 epochs, with pruning).
+  Papers can report "SENN test accuracy" from this script. final_metrics.json
+  is the canonical output for tables (test_accuracy, param_count, flops).
+
+--------------------------------------------------------------------------------
+5. MULTI-SEED EVALUATION (MEAN ± STD)
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- scripts/run_multi_seed.py (NEW FILE)
+  - CLI: --num_seeds (default 3), --seeds (comma-separated, overrides
+    num_seeds), --epochs_final (default 100), --out (default
+    outputs/multi_seed_results.json), plus optional --generations, --population_size,
+    --no_pruning, --fitness_only (for ablations; not yet wired to main.py env).
+  - For each seed in the list (default [42, 123, 456, ...][:num_seeds]):
+    - Sets SENN_SEED=<seed> and runs main.py (evolution) as subprocess.
+    - Finds the latest run dir under outputs/ (by mtime).
+    - Runs scripts/train_best_to_convergence.py --run_dir <that_dir> --epochs
+      <epochs_final> --seed <seed>.
+    - Reads that run_dir/final_metrics.json and collects test_accuracy,
+      param_count, flops.
+  - Aggregates: computes mean and std of test_accuracy, param_count, flops across
+    successful runs; also min/max test accuracy.
+  - Writes --out JSON with: num_seeds, seeds, num_success, test_accuracy_mean,
+    test_accuracy_std, test_accuracy_min, test_accuracy_max, param_count_mean/std,
+    flops_mean/std, epochs_final, run_dirs, per_seed list.
+  - Prints a short summary (test accuracy mean ± std, params mean ± std).
+
+WHY IT WAS DONE
+- Papers report results as mean ± std over multiple seeds (e.g. 3 or 5 runs).
+  This script automates: run evolution + final training for each seed, then
+  aggregate and save/print the statistics.
+
+IMPACT
+- One command (e.g. python scripts/run_multi_seed.py --num_seeds 5 --epochs_final 200)
+  produces a single JSON and console summary suitable for a paper table row
+  ("SENN: X.XX ± X.XX test accuracy over 5 seeds").
+
+--------------------------------------------------------------------------------
+6. BASELINE MODELS AND COMPARISON SCRIPT
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- models/baselines.py (NEW FILE)
+  - SmallVGG(num_classes=10): A small VGG-style CNN for CIFAR-10 (32x32 input).
+    Four conv blocks (64-64, 128-128, 256-256 with MaxPool after each block),
+    AdaptiveAvgPool2d(1), then Linear to num_classes. Uses BatchNorm and ReLU.
+    Roughly ~0.5M parameters.
+  - SmallResNet(num_classes=10): A small ResNet for CIFAR-10. Conv1 3->16, then
+    three "layers" (Block) with 16, 32, 64 channels, 2 blocks each, stride 2
+    on first block of layer2 and layer3, AdaptiveAvgPool2d(1), Linear to
+    num_classes. Roughly ~1.1M parameters.
+  - get_baseline(name, num_classes=10): returns SmallVGG or SmallResNet for
+    name "small_vgg" or "small_resnet".
+
+- scripts/run_baselines.py (NEW FILE)
+  - CLI: --baselines (default "small_vgg,small_resnet"), --epochs (default 200),
+    --seed (default 42), --out (default outputs/baseline_results.json).
+  - For each baseline name: builds model with get_baseline(), runs
+    train_epochs_cosine() with the same data loaders (get_cifar10_loaders) and
+    same epochs/optimizer settings, then evaluates on test set and computes
+    param_count and flops. Appends to results list.
+  - Writes --out with {"baselines": [...], "epochs": ..., "seed": ...}. Each
+    baseline entry: name, test_accuracy, best_val_accuracy, param_count, flops,
+    epochs, seed.
+
+WHY IT WAS DONE
+- To compare SENN-evolved architectures against fixed, hand-designed small CNNs
+  on the same dataset and same training recipe (cosine LR, same epochs). SmallVGG
+  represents a simple classic design; SmallResNet represents a modern residual
+  design. Both are similar in scale (small-to-medium) to the SENN search space
+  so the comparison is fair.
+
+IMPACT
+- Users can run python scripts/run_baselines.py --epochs 200 and get test
+  accuracy and efficiency for SmallVGG and SmallResNet. These numbers can be
+  put in the same table as SENN's final_metrics (or multi_seed mean ± std) for
+  "SENN vs baselines" comparison.
+
+--------------------------------------------------------------------------------
+7. REPRODUCTION SCRIPT
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- scripts/reproduce_paper.py (NEW FILE)
+  - CLI: --full (run full 5-seed + baselines), default is "quick".
+  - Quick: runs main.py twice (seeds 42 and 123 via SENN_SEED), then
+    train_best_to_convergence.py on the latest run dir with --epochs 20, then
+    run_baselines.py with --epochs 20, --out outputs/reproduce_baselines_quick.json.
+  - Full: runs run_multi_seed.py with --num_seeds 5, --epochs_final 200,
+    --out outputs/reproduce_multi_seed.json; then run_baselines.py with
+    --epochs 200, --out outputs/reproduce_baselines.json.
+  - After running, prints a short "Summary (paper-style)" section: if full,
+    reads reproduce_multi_seed.json and prints SENN test accuracy mean ± std;
+    else reads latest run_dir/final_metrics.json for one SENN run. Then reads
+    whichever baseline JSON exists and prints each baseline's test_acc and
+    params. Ends with reminder commands for full paper table.
+
+WHY IT WAS DONE
+- To give a single entry point for "reproduce paper results": either a quick
+  sanity check (few seeds, short epochs) or the full evaluation (5 seeds, 200
+  epochs + baselines).
+
+IMPACT
+- Users can run python scripts/reproduce_paper.py for a quick check or
+  python scripts/reproduce_paper.py --full for the full table without
+  remembering multiple commands.
+
+--------------------------------------------------------------------------------
+8. EVALUATE_BEST_MODEL.PY: FLEXIBLE RUN DIR AND SAVE PATH
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- evaluate_best_model.py
+  - Added argparse: --run_dir (optional). If not provided, the script finds
+    the latest run dir under outputs/ (sorted by mtime, take newest).
+  - If no run dir exists or best_architecture.json is missing, raises
+    FileNotFoundError with a clear message.
+  - Loads best_architecture.json from the chosen run_dir (not a hardcoded path).
+  - After training, saves weights to run_dir/best_phase1_model.pth instead of
+    a fixed outputs/best_phase1_model.pth.
+  - evaluate_best_model(run_dir) is the main logic; __main__ parses args and
+    calls it with args.run_dir.
+
+WHY IT WAS DONE
+- The script previously had a hardcoded path (e.g. outputs/run_20260216_210150/).
+  So after a new main.py run, the user had to edit the script to point to the
+  new run. Making run_dir an argument (and defaulting to "latest run") makes it
+  usable for any run without code changes.
+
+IMPACT
+- User can run python evaluate_best_model.py (uses latest run) or
+  python evaluate_best_model.py --run_dir outputs/run_YYYYMMDD_HHMMSS. Weights
+  are stored inside that run dir for clarity.
+
+--------------------------------------------------------------------------------
+9. WARM START: SECOND RUN CAN IMPROVE ON PREVIOUS BEST
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- evolution/evolve.py
+  - init_population() now accepts an optional fourth argument:
+    seed_dnas: list[ArchitectureDNA] | None = None.
+  - If seed_dnas is non-empty, those DNAs are converted to Individual (with
+    parent_id=None, generation=0) and added to the population first. Then
+    random individuals (via random_genome(rng)) are added until the population
+    size reaches P. So the initial population = [seed_dnas...] + [random...].
+  - evolve() signature extended: evolve(..., warm_start_run_dir: Path | None = None).
+  - At the start of evolve(), if warm_start_run_dir is not None and is a
+    directory and warm_start_run_dir/best_architecture.json exists, that JSON
+    is loaded, converted to ArchitectureDNA, and put into a one-element list
+    seed_dnas. A print statement "[WARM START] Seeding population with best
+    from <dir_name>" is emitted. Then init_population(..., seed_dnas=seed_dnas)
+    is called.
+
+- main.py
+  - warm_start_dir = os.environ.get("SENN_WARM_START_RUN_DIR"). If set,
+    warm_start_path = Path(warm_start_dir); else warm_start_path = None.
+  - evolve() is called with warm_start_run_dir=warm_start_path.
+  - Imports: added Path from pathlib; os was already used for SENN_SEED.
+
+WHY IT WAS DONE
+- By default, every run of main.py starts from a brand-new random population.
+  So a "second run" does not build on the first run's best architecture; it
+  is independent. The user wanted the option for the second run to "try to
+  improve on the previous best". Warm start does that by putting the previous
+  run's best architecture into the initial population so evolution can mutate
+  from it and potentially find a better one.
+
+IMPACT
+- User can run:
+  1) python main.py  →  get outputs/run_A.
+  2) SENN_WARM_START_RUN_DIR=outputs/run_A SENN_SEED=123 python main.py  →  get
+     outputs/run_B, where the initial population of run_B contains the best
+     architecture from run_A. So the second run can improve (or match) the
+     previous best. Without warm start, the second run would be independent.
+
+--------------------------------------------------------------------------------
+10. VERIFICATION SCRIPT (CHECKING THAT CHANGES HELP)
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- scripts/verify_improvements.py (NEW FILE)
+  - --check determinism: Runs main.py twice with SENN_SEED=42 (subprocess),
+    each time finds the latest run dir and reads best_architecture.json to
+    get the arch_id (via ArchitectureDNA.from_dict(...).arch_id()). Compares
+    the two arch_ids; if equal, prints PASS (determinism); else FAIL.
+  - --check option_compare: If --run_dir is given, uses it; else uses the
+    latest run dir. Runs evaluate_best_model.py (Option A) for that run_dir,
+    parses stdout for "FINAL TEST ACCURACY" to get test acc A. Then runs
+    train_best_to_convergence.py (Option B) with --epochs 50 (or --epochs_b),
+    reads run_dir/final_metrics.json for test_accuracy B. Prints both and
+    whether B >= A (or notes that B can be lower in some cases). Does not fail
+    if B < A (still reports).
+  - --check warm_start: Runs main.py with seed 42, gets run1. Then runs main.py
+    with seed 123 and SENN_WARM_START_RUN_DIR=run1, gets run2. Reads both
+    metrics.csv to get best val accuracy per run and prints them. Confirms
+    warm start path was used.
+  - --check all: Runs all three checks. Default is --check all.
+
+WHY IT WAS DONE
+- The user asked how to verify that the code changes actually lead to
+  improvements (e.g. determinism, Option B vs A, warm start). This script
+  automates those checks so the user can run one command and see PASS/FAIL or
+  comparison numbers.
+
+IMPACT
+- User can run python scripts/verify_improvements.py --check determinism to
+  confirm same seed => same best arch; --check option_compare to compare
+  Option A vs B on the same run; --check warm_start to confirm warm start
+  runs; or --check all (slow: multiple full evolutions).
+
+--------------------------------------------------------------------------------
+11. README UPDATES
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- README.md
+  - Outputs & Artifacts: Added metrics.csv, search_cost.json, and
+    final_metrics.json (from train_best_to_convergence) to the list of outputs.
+  - New section "Reproduction & Paper Evaluation" with:
+    - Determinism (seed, SENN_SEED).
+    - Final training (train_best_to_convergence.py command and purpose).
+    - Multi-seed (run_multi_seed.py command and output).
+    - Baselines (run_baselines.py and models/baselines.py).
+    - Ablations (use_pruning, use_pareto in config).
+    - One-command reproduction (reproduce_paper.py quick vs full).
+    - Search cost (search_cost.json contents).
+  - New subsection "Verifying that changes improve results": determinism check
+    (run main twice with same seed, compare best_architecture.json); Option A
+    vs B comparison (commands); automated checks (verify_improvements.py).
+  - New subsection "Warm start: 2nd run improves on previous best": explains
+    that by default the 2nd run does not use the 1st run's result; then gives
+    the SENN_WARM_START_RUN_DIR=... command so the 2nd run seeds from the
+    previous best.
+
+WHY IT WAS DONE
+- To document all new scripts, config options, and workflows so that anyone
+  (or the user elsewhere) can reproduce and verify results without reading
+  the code.
+
+IMPACT
+- Single place to look for: how to reproduce, how to verify, how to do warm
+  start, and what each output file means.
+
+--------------------------------------------------------------------------------
+12. MAIN.PY: IMPORTS AND WARM START WIRING
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- main.py
+  - Imports: added "from pathlib import Path", kept "import os" at top level
+    (removed duplicate "import os" that was inside main()).
+  - Before calling evolve(): reads SENN_WARM_START_RUN_DIR from env, converts
+    to Path if set, passes to evolve() as warm_start_run_dir.
+
+WHY IT WAS DONE
+- To support warm start from the environment variable without changing the
+  evolve() call site in other potential entry points. Clean separation.
+
+IMPACT
+- Warm start is controlled purely by environment variable; no script edit
+  needed.
+
+--------------------------------------------------------------------------------
+13. EVOLUTION LOOP: PRUNING AND SELECTION BRANCHES
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- evolution/evolve.py
+  - In the per-individual loop: the block that built the model and applied
+    prune_model and printed "Validation accuracy after pruning" is now
+    conditional on use_pruning. If use_pruning is False, only build_model_from_dna
+    is called and the prune/eval-print are skipped.
+  - The survivor selection block: previously always built Candidate list and
+    called nsga2_select. Now there is an if use_pareto branch (same as before)
+    and an else branch that sorts scored by fitness descending and takes the
+    first elite_k arch_ids as survivor_ids. elites is then computed the same
+    way (indiv for which arch_id in survivor_ids).
+
+WHY IT WAS DONE
+- To implement the ablation flags (use_pruning, use_pareto) so that their
+  effect is observable without code changes.
+
+IMPACT
+- Config toggles actually change behavior in the evolution loop; no need to
+  comment out code for ablations.
+
+--------------------------------------------------------------------------------
+14. FIX FOR INPUT_SIZE IN EVALUATE CALLS (MINOR)
+--------------------------------------------------------------------------------
+
+WHAT WAS CHANGED
+- evaluate_best_model.py and scripts/train_best_to_convergence.py call
+  evaluate(model, loader, device, input_size=(1, 3, 32, 32)) where appropriate.
+  (evaluate() in train_eval.py does not use input_size internally; it was
+  added for API consistency. No functional change to accuracy; only consistency.)
+
+WHY IT WAS DONE
+- To pass a batch-shaped input_size (1, 3, 32, 32) where the API expects it,
+  for consistency with evolve.py and future use (e.g. FLOPs).
+
+IMPACT
+- Negligible; avoids confusion if someone later uses input_size inside
+  evaluate().
+
+--------------------------------------------------------------------------------
+15. SUMMARY: FILES TOUCHED AND NEW FILES
+--------------------------------------------------------------------------------
+
+MODIFIED FILES
+- config.py                          (ablation flags)
+- main.py                            (SENN_SEED, warm start env, Path import)
+- models/model_space.py              (random_genome(rng=))
+- evolution/evolve.py                (init_population rng+seed_dnas, evolve
+                                      warm_start_run_dir, use_pruning/use_pareto,
+                                      search cost, json/shim/time imports)
+- evaluation/train_eval.py           (get_cosine_scheduler, train_epochs_cosine)
+- evaluate_best_model.py             (argparse, latest run dir, save to run_dir)
+- README.md                          (reproduction, verification, warm start,
+                                      outputs list)
+
+NEW FILES
+- scripts/train_best_to_convergence.py   (final training to convergence)
+- scripts/run_multi_seed.py              (multi-seed evolution + final train)
+- scripts/run_baselines.py               (train SmallVGG / SmallResNet)
+- scripts/reproduce_paper.py             (quick/full reproduction)
+- models/baselines.py                    (SmallVGG, SmallResNet, get_baseline)
+- scripts/verify_improvements.py        (determinism, option_compare, warm_start)
+
+--------------------------------------------------------------------------------
+16. WHAT WAS NOT CHANGED (CLARIFICATIONS)
+--------------------------------------------------------------------------------
+
+- The evolution loop still runs the same number of generations and population
+  size unless the user changes config. We did not add CLI args to main.py for
+  generations/population; run_multi_seed.py does not override them (could be
+  done via env in the future).
+- evaluate() in train_eval.py still does not use the input_size parameter
+  internally; it is there for API consistency.
+- Pruning during search is still the default (use_pruning=True). Only the
+  final training script (train_best_to_convergence) does not prune, by design.
+- The server (server.py) and frontend were not modified.
+- load_best.py and experiments/retrain_best.py were not modified (they use
+  the older genome-based model and BEST_GENOME; separate from the DNA pipeline).
+
+--------------------------------------------------------------------------------
+END OF DOCUMENT
+--------------------------------------------------------------------------------
