@@ -20,6 +20,8 @@ Thumbs.db
 # Dataset files
 data/cifar-10-batches-py/
 data/*.tar.gz
+local_cifar_data/
+*.tar.gz
 
 # Outputs and Models
 outputs/*

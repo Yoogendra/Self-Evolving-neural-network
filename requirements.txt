@@ -6,4 +6,6 @@ websockets
 matplotlib
 numpy
 streamlit
+plotly
 requests
+Pillow

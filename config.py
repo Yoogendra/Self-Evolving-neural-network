@@ -17,7 +17,7 @@ class Config:
     batch_size: int = 256
     num_workers: int = 2
     # Phase 1: final retrain of best DNA
-    final_train_epochs: int = 40
+    final_train_epochs: int = 100
     weight_decay: float = 1e-4
 
     # ---- Research / ablation flags ----
