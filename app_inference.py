@@ -187,63 +187,116 @@ def load_baseline_model() -> tuple[nn.Module, int, str]:
     model.eval()
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return model, n_params, status
-@st.cache_resource(show_spinner="Loading best SENN model…")
+@st.cache_resource(show_spinner="Loading collaborator's advanced SENN model…")
 def load_senn_model() -> tuple[Optional[nn.Module], int, str]:
     """
-    Dynamically loads the best SENN architecture + weights from the latest
-    outputs/run_<timestamp>/ directory, mirroring live_comparison.py logic.
+    [ACTIVE: COLLABORATOR'S V2 PIPELINE]
+    Loads the retrained SENN model from a specific high-performance run.
+    Uses 'best_architecture.json' for structure and 'best_model_retrained.pth' for weights.
     """
     try:
         from evolution.dna_builder import build_model_from_dna
         from evolution.dna_schema import ArchitectureDNA
-        outputs = PROJECT_ROOT / "outputs"
-        runs = sorted(
-            [d for d in outputs.iterdir() if d.is_dir() and d.name.startswith("run_")],
-            key=lambda p: p.name,
-        )
-        if not runs:
-            return None, 0, "❌ No run directories found in outputs/"
-        run_dir = runs[-1]
-        dna_dict = None
-        # Priority: best_architecture.json > best arch from metrics.csv
-        best_arch_file = run_dir / "best_architecture.json"
-        if best_arch_file.exists():
-            dna_dict = json.loads(best_arch_file.read_text())
-        else:
-            # Fallback: scan metrics.csv
-            metrics_csv = run_dir / "metrics.csv"
-            if metrics_csv.exists():
-                import csv as _csv
-                best_acc, best_id = -1.0, None
-                with open(metrics_csv) as f:
-                    for row in _csv.DictReader(f):
-                        try:
-                            acc = float(row["val_accuracy"])
-                            if acc > best_acc:
-                                best_acc, best_id = acc, row["arch_id"]
-                        except (KeyError, ValueError):
-                            continue
-                if best_id:
-                    arch_path = run_dir / "population" / best_id / "arch.json"
-                    if arch_path.exists():
-                        dna_dict = json.loads(arch_path.read_text())
-        if dna_dict is None:
-            return None, 0, f"❌ Could not locate best architecture JSON in {run_dir}"
-        dna   = ArchitectureDNA.from_dict(dna_dict)
+
+        # Hard-coded path to collaborator's advanced run as per tasking
+        run_dir = PROJECT_ROOT / "outputs" / "run_20260327_111850"
+
+        if not run_dir.exists():
+            return None, 0, f"❌ Run directory not found: {run_dir.name}"
+
+        # 1. Load Architecture Skeleton
+        arch_path = run_dir / "best_architecture.json"
+        if not arch_path.exists():
+            return None, 0, f"❌ Architecture JSON missing: {arch_path.name}"
+
+        dna_dict = json.loads(arch_path.read_text())
+        dna = ArchitectureDNA.from_dict(dna_dict)
         model = build_model_from_dna(dna).to("cpu")
-        weights_path = run_dir / "best_phase1_model.pth"
-        if weights_path.exists():
-            model.load_state_dict(
-                torch.load(weights_path, map_location="cpu", weights_only=True)
-            )
-            status = f"✅ Loaded weights from `{run_dir.name}`"
-        else:
-            status = f"⚠️ No weights file found in {run_dir.name} — untrained model"
+
+        # 2. Load Retrained Weights
+        weights_path = run_dir / "best_model_retrained.pth"
+        if not weights_path.exists():
+            return None, 0, f"❌ Weights file missing: {weights_path.name}"
+
+        state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
+
+        # 3. Production-Grade Key Cleaning (Handling DataParallel 'module.' prefix)
+        clean_sd = {}
+        for k, v in state_dict.items():
+            # Strip 'module.' if present (common in DistributedDataParallel exports)
+            name = k[7:] if k.startswith("module.") else k
+            clean_sd[name] = v
+
+        # Load with strict=False to handle minor naming variations gracefully
+        msg = model.load_state_dict(clean_sd, strict=False)
+
+        status = f"✅ Loaded Collaborator V2 ({run_dir.name})"
+        if msg.missing_keys:
+            status += f" [Note: {len(msg.missing_keys)} keys missing]"
+
         model.eval()
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         return model, n_params, status
+
     except Exception as exc:
-        return None, 0, f"❌ Error loading SENN: {exc}"
+        return None, 0, f"❌ Error loading V2 SENN: {exc}"
+
+# [TOGGLE: USER'S V1 PIPELINE ARTIFACTS]
+# @st.cache_resource(show_spinner="Loading best SENN model…")
+# def load_senn_model() -> tuple[Optional[nn.Module], int, str]:
+#     """
+#     Dynamically loads the best SENN architecture + weights from the latest
+#     outputs/run_<timestamp>/ directory, mirroring live_comparison.py logic.
+#     """
+#     try:
+#         from evolution.dna_builder import build_model_from_dna
+#         from evolution.dna_schema import ArchitectureDNA
+#         outputs = PROJECT_ROOT / "outputs"
+#         runs = sorted(
+#             [d for d in outputs.iterdir() if d.is_dir() and d.name.startswith("run_")],
+#             key=lambda p: p.name,
+#         )
+#         if not runs:
+#             return None, 0, "❌ No run directories found in outputs/"
+#         run_dir = runs[-1]
+#         dna_dict = None
+#         best_arch_file = run_dir / "best_architecture.json"
+#         if best_arch_file.exists():
+#             dna_dict = json.loads(best_arch_file.read_text())
+#         else:
+#             metrics_csv = run_dir / "metrics.csv"
+#             if metrics_csv.exists():
+#                 import csv as _csv
+#                 best_acc, best_id = -1.0, None
+#                 with open(metrics_csv) as f:
+#                     for row in _csv.DictReader(f):
+#                         try:
+#                             acc = float(row["val_accuracy"])
+#                             if acc > best_acc:
+#                                 best_acc, best_id = acc, row["arch_id"]
+#                         except (KeyError, ValueError):
+#                             continue
+#                 if best_id:
+#                     arch_path = run_dir / "population" / best_id / "arch.json"
+#                     if arch_path.exists():
+#                         dna_dict = json.loads(arch_path.read_text())
+#         if dna_dict is None:
+#             return None, 0, f"❌ Could not locate best architecture JSON in {run_dir}"
+#         dna   = ArchitectureDNA.from_dict(dna_dict)
+#         model = build_model_from_dna(dna).to("cpu")
+#         weights_path = run_dir / "best_phase1_model.pth"
+#         if weights_path.exists():
+#             model.load_state_dict(
+#                 torch.load(weights_path, map_location="cpu", weights_only=True)
+#             )
+#             status = f"✅ Loaded weights from `{run_dir.name}`"
+#         else:
+#             status = f"⚠️ No weights file found in {run_dir.name} — untrained model"
+#         model.eval()
+#         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+#         return model, n_params, status
+#     except Exception as exc:
+#         return None, 0, f"❌ Error loading SENN: {exc}"
 # ─────────────────────────────────────────────────────────────────────────────
 # Inference helper
 # ─────────────────────────────────────────────────────────────────────────────
