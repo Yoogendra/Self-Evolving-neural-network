@@ -187,27 +187,27 @@ def load_baseline_model() -> tuple[nn.Module, int, str]:
     model.eval()
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return model, n_params, status
-@st.cache_resource(show_spinner="Loading collaborator's advanced SENN model…")
-def load_senn_model() -> tuple[Optional[nn.Module], int, str]:
+@st.cache_resource(show_spinner="Loading SENN model weights…")
+def load_senn_model(run_dir_name: str) -> tuple[Optional[nn.Module], int, str]:
     """
     [ACTIVE: COLLABORATOR'S V2 PIPELINE]
-    Loads the retrained SENN model from a specific high-performance run.
+    Loads the retrained SENN model from `run_dir_name` inside outputs/.
+    Cache is keyed on `run_dir_name` so switching runs reloads automatically.
     Uses 'best_architecture.json' for structure and 'best_model_retrained.pth' for weights.
     """
     try:
         from evolution.dna_builder import build_model_from_dna
         from evolution.dna_schema import ArchitectureDNA
 
-        # Hard-coded path to collaborator's advanced run as per tasking
-        run_dir = PROJECT_ROOT / "outputs" / "run_20260327_111850"
+        run_dir = PROJECT_ROOT / "outputs" / run_dir_name
 
         if not run_dir.exists():
-            return None, 0, f"❌ Run directory not found: {run_dir.name}"
+            return None, 0, f"❌ Run directory not found: {run_dir_name}"
 
         # 1. Load Architecture Skeleton
         arch_path = run_dir / "best_architecture.json"
         if not arch_path.exists():
-            return None, 0, f"❌ Architecture JSON missing: {arch_path.name}"
+            return None, 0, f"❌ Architecture JSON missing in {run_dir_name}"
 
         dna_dict = json.loads(arch_path.read_text())
         dna = ArchitectureDNA.from_dict(dna_dict)
@@ -216,7 +216,7 @@ def load_senn_model() -> tuple[Optional[nn.Module], int, str]:
         # 2. Load Retrained Weights
         weights_path = run_dir / "best_model_retrained.pth"
         if not weights_path.exists():
-            return None, 0, f"❌ Weights file missing: {weights_path.name}"
+            return None, 0, f"❌ Weights file missing in {run_dir_name}"
 
         state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
 
@@ -230,16 +230,16 @@ def load_senn_model() -> tuple[Optional[nn.Module], int, str]:
         # Load with strict=False to handle minor naming variations gracefully
         msg = model.load_state_dict(clean_sd, strict=False)
 
-        status = f"✅ Loaded Collaborator V2 ({run_dir.name})"
+        status = f"✅ Loaded: {run_dir_name}"
         if msg.missing_keys:
-            status += f" [Note: {len(msg.missing_keys)} keys missing]"
+            status += f" [{len(msg.missing_keys)} keys missing]"
 
         model.eval()
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         return model, n_params, status
 
     except Exception as exc:
-        return None, 0, f"❌ Error loading V2 SENN: {exc}"
+        return None, 0, f"❌ Error loading SENN: {exc}"
 
 # [TOGGLE: USER'S V1 PIPELINE ARTIFACTS]
 # @st.cache_resource(show_spinner="Loading best SENN model…")
@@ -419,16 +419,64 @@ def get_random_cifar_sample(seed: Optional[int] = None):
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Scan outputs/ OUTSIDE the sidebar block so the value is available globally.
+# Sort newest-first by folder name (timestamps in name → lexicographic = chronological).
+_available_runs: list[str] = sorted(
+    [d.name for d in (PROJECT_ROOT / "outputs").iterdir()
+     if d.is_dir() and d.name.startswith("run_")],
+    reverse=True,   # newest at the top of the dropdown
+)
+
 with st.sidebar:
     st.markdown('<div style="font-size:1.5rem;font-weight:700;color:#e6edf3;">🧬 SENN</div>', unsafe_allow_html=True)
     st.markdown('<div style="color:#8b949e;font-size:0.8rem;margin-bottom:20px;">Self-Evolving Neural Network</div>', unsafe_allow_html=True)
+
+    # ── Run Selector ───────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">SENN Run</div>', unsafe_allow_html=True)
+
+    if not _available_runs:
+        st.error("No run_* directories found in outputs/")
+        selected_run = None
+    else:
+        selected_run = st.selectbox(
+            "Select Run ID",
+            options=_available_runs,
+            index=0,   # newest is at index 0 after reverse-sort
+            help="Sorted newest → oldest. Switch runs to hot-swap the SENN model.",
+            label_visibility="collapsed",
+        )
+
+    # ── Pre-flight file validation ─────────────────────────────────────────
+    # Warn immediately if the selected folder is missing required artifacts,
+    # before the heavyweight model-load is triggered.
+    if selected_run:
+        _run_path = PROJECT_ROOT / "outputs" / selected_run
+        _missing = []
+        if not (_run_path / "best_architecture.json").exists():
+            _missing.append("best_architecture.json")
+        if not (_run_path / "best_model_retrained.pth").exists():
+            _missing.append("best_model_retrained.pth")
+        if _missing:
+            st.error(f"⚠️ Missing in `{selected_run}`: {', '.join(_missing)}")
+        else:
+            st.caption(f"📁 `{selected_run}`")
+
+    # ── Model Status ───────────────────────────────────────────────────────
     st.markdown('<div class="section-header">Model Status</div>', unsafe_allow_html=True)
     baseline_model, baseline_n_params, baseline_status = load_baseline_model()
-    senn_model,     senn_n_params,     senn_status     = load_senn_model()
-    st.markdown(f'<span class="pill-base">Baseline CNN</span>', unsafe_allow_html=True)
+
+    # Pass selected run name; cache re-keys automatically on change.
+    senn_model, senn_n_params, senn_status = (
+        load_senn_model(selected_run) if selected_run else (None, 0, "⚠️ No run selected")
+    )
+
+    st.markdown('<span class="pill-base">Baseline CNN</span>', unsafe_allow_html=True)
     st.caption(baseline_status)
-    st.markdown(f'<span class="pill-senn">SENN</span>', unsafe_allow_html=True)
+    st.markdown('<span class="pill-senn">SENN</span>', unsafe_allow_html=True)
     st.caption(senn_status)
+
+    # ── Image Source ───────────────────────────────────────────────────────
     st.markdown('<div class="section-header">Image Source</div>', unsafe_allow_html=True)
     source = st.radio("", ["🎲  Random CIFAR-10 Sample", "📁  Upload Image"], label_visibility="collapsed")
     uploaded_file  = None
