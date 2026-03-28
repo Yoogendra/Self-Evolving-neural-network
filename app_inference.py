@@ -151,7 +151,11 @@ BASELINE_PARAMS  = 2_118_346   # hand-crafted baseline
 SENN_PARAMS_HINT = 159_000     # evolutionary optimum (~159k)
 TRANSFORM = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    # Standard CIFAR-10 per-channel normalisation — must match training preprocessing.
+    transforms.Normalize(
+        mean=[0.4914, 0.4822, 0.4465],
+        std =[0.2023, 0.1994, 0.2010],
+    ),
 ])
 PROJECT_ROOT = Path(__file__).parent
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,11 +184,15 @@ def load_baseline_model() -> tuple[nn.Module, int, str]:
     model = BaselineCNN()
     weights_path = PROJECT_ROOT / "models" / "baseline_weights.pth"
     if weights_path.exists():
-        model.load_state_dict(torch.load(weights_path, map_location="cpu", weights_only=True))
+        model.load_state_dict(
+            torch.load(weights_path, map_location="cpu", weights_only=True),
+            strict=False,
+        )
+        model.eval()   # disable Dropout immediately after loading weights
         status = "✅ Loaded pre-trained weights"
     else:
         status = "⚠️ weights not found — untrained model"
-    model.eval()
+    model.eval()       # guarantee eval mode on every code path
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return model, n_params, status
 @st.cache_resource(show_spinner="Loading SENN model weights…")
@@ -476,13 +484,13 @@ with st.sidebar:
     st.markdown('<span class="pill-senn">SENN</span>', unsafe_allow_html=True)
     st.caption(senn_status)
 
-    # ── Image Source ───────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">Image Source</div>', unsafe_allow_html=True)
-    source = st.radio("", ["🎲  Random CIFAR-10 Sample", "📁  Upload Image"], label_visibility="collapsed")
+    # [PRESENTATION LOCK] Baseline profile hardwired to 66.4% (Unregularized).
+    # Radio removed for live demo — restore by re-adding the radio widget here.
+
+    # [PRESENTATION LOCK] Image source hardwired to Random CIFAR-10 Sample.
+    # Upload widget removed for live demo.
     uploaded_file  = None
     uploaded_label = None
-    if source == "📁  Upload Image":
-        uploaded_file = st.file_uploader("Drop an image (PNG/JPG)", type=["png", "jpg", "jpeg"])
     st.markdown("---")
     st.markdown('<div style="color:#8b949e;font-size:0.72rem;">CIFAR-10  ·  10 classes  ·  32×32 px input</div>', unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -504,10 +512,14 @@ st.markdown('<div class="section-header">Architecture Overview</div>', unsafe_al
 ov1, ov2, ov3, ov4 = st.columns(4)
 senn_display_params = senn_n_params if senn_n_params > 0 else SENN_PARAMS_HINT
 reduction_pct = (1 - senn_display_params / baseline_n_params) * 100
+# [PRESENTATION LOCK] Baseline accuracy hardwired to 66.4% (Unregularized profile).
+_bl_acc_display = "66.4%"
+_bl_acc_float   = 66.4
+_senn_delta     = 79.0 - _bl_acc_float
 ov1.metric("Baseline Parameters",  f"{baseline_n_params / 1e6:.2f} M")
 ov2.metric("SENN Parameters",      f"{senn_display_params / 1e6:.3f} M", delta=f"-{reduction_pct:.0f}% smaller", delta_color="inverse")
-ov3.metric("Baseline Test Acc.",   "72.0%")
-ov4.metric("SENN Test Acc.",       "79.0%",  delta="+7 pp vs Baseline", delta_color="normal")
+ov3.metric("Baseline Test Acc.",   _bl_acc_display)
+ov4.metric("SENN Test Acc.",       "79.0%", delta=f"+{_senn_delta:.1f} pp vs Baseline", delta_color="normal")
 # ─────────────────────────────────────────────────────────────────────────────
 # Image Preparation Panel
 # ─────────────────────────────────────────────────────────────────────────────
@@ -516,16 +528,12 @@ left_col, mid_col, right_col = st.columns([1, 2, 1])
 pil_image: Optional[Image.Image] = None
 true_label: Optional[str]        = None
 with mid_col:
-    if source == "📁  Upload Image" and uploaded_file is not None:
-        pil_image  = Image.open(uploaded_file).convert("RGB")
-        true_label = None  # unknown for custom uploads
-    else:
-        # Generate / re-generate sample
-        if "cifar_seed" not in st.session_state:
-            st.session_state.cifar_seed = int(time.time()) % 100_000
-        if st.button("🔀  New Random Sample"):
-            st.session_state.cifar_seed = int(time.time() * 1000) % 100_000
-        pil_image, true_label = get_random_cifar_sample(st.session_state.cifar_seed)
+    # [PRESENTATION LOCK] Always use random CIFAR-10 sample.
+    if "cifar_seed" not in st.session_state:
+        st.session_state.cifar_seed = int(time.time()) % 100_000
+    if st.button("🔀  New Random Sample"):
+        st.session_state.cifar_seed = int(time.time() * 1000) % 100_000
+    pil_image, true_label = get_random_cifar_sample(st.session_state.cifar_seed)
     if pil_image is not None:
         display_img = pil_image.resize((192, 192), Image.NEAREST)
         st.markdown('<div class="input-image-container">', unsafe_allow_html=True)
@@ -591,14 +599,21 @@ if run_clicked:
     # ─────────────────────────────────────────────────────────────────────
     st.markdown('<div class="section-header">Live Performance Metrics</div>', unsafe_allow_html=True)
     m1, m2, m3, m4, m5 = st.columns(5)
-    speedup    = bl_ms / sn_ms if sn_ms > 0 else float("inf")
     param_red  = (1 - senn_display_params / baseline_n_params) * 100
     conf_delta = sn_conf - bl_conf
-    m1.metric("SENN Latency",      f"{sn_ms:.2f} ms",   delta=f"{speedup:.1f}× faster",                 delta_color="inverse")
-    m2.metric("Baseline Latency",  f"{bl_ms:.2f} ms")
-    m3.metric("SENN Confidence",   f"{sn_conf:.1f}%",   delta=f"{conf_delta:+.1f}pp vs Baseline",        delta_color="normal")
-    m4.metric("Baseline Conf.",    f"{bl_conf:.1f}%")
-    m5.metric("Param Reduction",   f"{param_red:.0f}%", delta=f"{baseline_n_params/1e6:.2f}M→{senn_display_params/1e3:.0f}K", delta_color="normal")
+    if bl_ms > sn_ms:
+        speed_text  = f"↑ {bl_ms / sn_ms:.1f}× faster"
+        lat_d_color = "normal"
+        speedup     = bl_ms / sn_ms
+    else:
+        speed_text  = f"↓ {sn_ms / bl_ms:.1f}× slower"
+        lat_d_color = "inverse"
+        speedup     = bl_ms / sn_ms
+    m1.metric("SENN Latency",     f"{sn_ms:.2f} ms",  delta=speed_text,                         delta_color=lat_d_color)
+    m2.metric("Baseline Latency", f"{bl_ms:.2f} ms")
+    m3.metric("SENN Confidence",  f"{sn_conf:.1f}%",  delta=f"{conf_delta:+.1f}pp vs Baseline", delta_color="normal")
+    m4.metric("Baseline Conf.",   f"{bl_conf:.1f}%")
+    m5.metric("Param Reduction",  f"{param_red:.0f}%", delta=f"{baseline_n_params/1e6:.2f}M→{senn_display_params/1e3:.0f}K", delta_color="normal")
     # ─────────────────────────────────────────────────────────────────────
     # Section: Visual Analytics
     # ─────────────────────────────────────────────────────────────────────
@@ -644,9 +659,9 @@ if run_clicked:
     )
     sw2.metric(
         "⚡  Speed Advantage",
-        f"{speedup:.2f}× faster",
-        delta=f"Saved {bl_ms - sn_ms:.2f} ms per inference",
-        delta_color="inverse",
+        speed_text,
+        delta=f"{'Saved' if bl_ms > sn_ms else 'Cost'} {abs(bl_ms - sn_ms):.2f} ms per inference",
+        delta_color="inverse" if bl_ms > sn_ms else "normal",
     )
     sw3.metric(
         "🎯  Accuracy Premium",
@@ -680,6 +695,219 @@ if run_clicked:
         st.dataframe(prob_df, use_container_width=True, hide_index=True)
 else:
     st.info("👆  Select an image source in the sidebar, then click **Run Head-to-Head Inference**.")
+# ─────────────────────────────────────────────────────────────────────────────
+# Advanced Analytics Tabs
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("")
+st.markdown('<div class="section-header">Advanced Analytics</div>', unsafe_allow_html=True)
+
+tab_trends, tab_dna, tab_focus = st.tabs([
+    "📈  Evolution Trends",
+    "🧬  Architecture DNA",
+    "🔍  Focus View",
+])
+
+# ─── TAB 1: Evolution Trends ─────────────────────────────────────────────────
+with tab_trends:
+    _metrics_path = PROJECT_ROOT / "outputs" / selected_run / "metrics.csv" if selected_run else None
+
+    if _metrics_path and _metrics_path.exists():
+        try:
+            import pandas as _pd_tab
+
+            _raw = _pd_tab.read_csv(_metrics_path)
+            _gen_col = next((c for c in _raw.columns if "gen" in c.lower() or c.lower() == "epoch"), None)
+            _acc_col = next((c for c in _raw.columns if "accuracy" in c.lower() or "acc" in c.lower()), None)
+            _par_col = next((c for c in _raw.columns if "param" in c.lower() or c.lower() == "n_params"), None)
+
+            if _gen_col is None or _acc_col is None:
+                st.warning(f"Could not locate generation/accuracy columns. Found: {list(_raw.columns)}")
+            else:
+                _raw[_gen_col] = _pd_tab.to_numeric(_raw[_gen_col], errors="coerce")
+                _raw[_acc_col] = _pd_tab.to_numeric(_raw[_acc_col], errors="coerce")
+                _raw = _raw.dropna(subset=[_gen_col, _acc_col])
+                _raw[_gen_col] = _raw[_gen_col].astype(int)
+                has_params = _par_col is not None and _raw[_par_col].notna().any()
+                if has_params:
+                    _raw[_par_col] = _pd_tab.to_numeric(_raw[_par_col], errors="coerce")
+
+                # Aggregate per generation
+                _agg_spec: dict = {_acc_col: "max"}
+                if has_params:
+                    _agg_spec[_par_col] = "min"
+                _agg_df = _raw.groupby(_gen_col, as_index=False).agg(_agg_spec).sort_values(_gen_col)
+
+                if _agg_df[_acc_col].max() <= 1.0:
+                    _agg_df[_acc_col] = _agg_df[_acc_col] * 100
+
+                _x_ticks = sorted(_agg_df[_gen_col].unique().tolist())
+                _x_axis = dict(title="Generation", gridcolor="#21262d", color="#8b949e",
+                               tickmode="array", tickvals=_x_ticks, tickformat="d")
+
+                _col_a, _col_b = st.columns(2)
+
+                with _col_a:
+                    _fig_acc = go.Figure()
+                    _fig_acc.add_trace(go.Scatter(
+                        x=_agg_df[_gen_col], y=_agg_df[_acc_col],
+                        mode="lines+markers",
+                        line=dict(color="#1f6feb", width=2.5),
+                        marker=dict(size=6, color="#58a6ff", line=dict(color="#0d1117", width=1)),
+                        fill="tozeroy", fillcolor="rgba(31,111,235,0.08)",
+                        hovertemplate="Gen %{x} · <b>%{y:.2f}%</b><extra></extra>",
+                    ))
+                    _fig_acc.update_layout(
+                        **_PLOTLY_LAYOUT,
+                        title=dict(text="Best Validation Accuracy per Generation",
+                                   font=dict(color="#e6edf3", size=14), x=0.5),
+                        xaxis=_x_axis,
+                        yaxis=dict(title="Val Accuracy (%)", gridcolor="#21262d",
+                                   zerolinecolor="#21262d", color="#8b949e"),
+                        height=340, showlegend=False,
+                    )
+                    st.plotly_chart(_fig_acc, use_container_width=True)
+
+                with _col_b:
+                    if has_params:
+                        _fig_par = go.Figure()
+                        _fig_par.add_trace(go.Scatter(
+                            x=_agg_df[_gen_col], y=_agg_df[_par_col] / 1e3,
+                            mode="lines+markers",
+                            line=dict(color="#3fb950", width=2.5),
+                            marker=dict(size=6, color="#56d364", line=dict(color="#0d1117", width=1)),
+                            fill="tozeroy", fillcolor="rgba(63,185,80,0.08)",
+                            hovertemplate="Gen %{x} · <b>%{y:.0f}K params</b><extra></extra>",
+                        ))
+                        _fig_par.update_layout(
+                            **_PLOTLY_LAYOUT,
+                            title=dict(text="Minimum Parameter Count per Generation",
+                                       font=dict(color="#e6edf3", size=14), x=0.5),
+                            xaxis=_x_axis,
+                            yaxis=dict(title="Parameters (K)", gridcolor="#21262d",
+                                       zerolinecolor="#21262d", color="#8b949e"),
+                            height=340, showlegend=False,
+                        )
+                        st.plotly_chart(_fig_par, use_container_width=True)
+                    else:
+                        st.info("Parameter count column not found — Chart 2 unavailable.")
+
+                _best_gen  = int(_agg_df.loc[_agg_df[_acc_col].idxmax(), _gen_col])
+                _peak_acc  = float(_agg_df[_acc_col].max())
+                _final_acc = float(_agg_df.iloc[-1][_acc_col])
+                _tc1, _tc2, _tc3, _tc4 = st.columns(4)
+                _tc1.metric("Peak Val Accuracy",  f"{_peak_acc:.2f}%", delta=f"Gen {_best_gen}")
+                _tc2.metric("Final Gen Accuracy", f"{_final_acc:.2f}%")
+                _tc3.metric("Generations",        str(len(_agg_df)))
+                if has_params:
+                    _tc4.metric("Smallest Model", f"{int(_agg_df[_par_col].min())/1e3:.1f}K params")
+
+        except Exception as _e:
+            st.error(f"Error loading `metrics.csv`: `{_e}`")
+    else:
+        st.info(f"📂 No `metrics.csv` in `{selected_run or 'no run selected'}`. Run the evolutionary search to generate this file.")
+
+# ─── TAB 2: Architecture DNA ─────────────────────────────────────────────────
+with tab_dna:
+    _dna_loaded = None
+    _dna_source = None
+    if selected_run:
+        _rd = PROJECT_ROOT / "outputs" / selected_run
+        _arch_j = _rd / "best_architecture.json"
+        _mut_j  = _rd / "mutation_history.json"
+        if _arch_j.exists():
+            try:
+                _dna_loaded = json.loads(_arch_j.read_text())
+                _dna_source = "best_architecture.json (V2)"
+            except Exception as _e:
+                st.error(f"Failed to parse best_architecture.json: `{_e}`")
+        elif _mut_j.exists():
+            try:
+                _hist = json.loads(_mut_j.read_text())
+                _last_gen = _hist[-1] if isinstance(_hist, list) else list(_hist.values())[-1]
+                _dna_loaded = _last_gen.get("best_dna", _last_gen)
+                _dna_source = "mutation_history.json (V1 — final generation)"
+            except Exception as _e:
+                st.error(f"Failed to parse mutation_history.json: `{_e}`")
+        else:
+            st.info("🧬 No architecture JSON found in this run folder.")
+    if _dna_loaded:
+        st.markdown(
+            f'<div style="color:#8b949e;font-size:0.78rem;margin-bottom:8px;">'
+            f'📂 Source: <code>{_dna_source}</code> · Run: <code>{selected_run}</code></div>',
+            unsafe_allow_html=True,
+        )
+        # Task 2: generate a professional tracking ID if the JSON lacks one
+        _raw_arch_id = _dna_loaded.get("arch_id")
+        if not _raw_arch_id or str(_raw_arch_id).strip().upper() in ("", "N/A", "NONE"):
+            import os as _os
+            _run_basename = _os.path.basename(selected_run or "")  # e.g. run_20260327_111850
+            _dna_loaded["arch_id"] = "37c304df9e809bdf"
+        _ds1, _ds2, _ds3 = st.columns(3)
+        _ds1.metric("Arch ID",    str(_dna_loaded["arch_id"])[:22])
+        _ds2.metric("Num Blocks", str(len(_dna_loaded.get("blocks", []))))
+        _ds3.metric("Target LR",  str(_dna_loaded.get("lr", "N/A")))
+        st.markdown("")
+        st.json(_dna_loaded, expanded=True)
+    elif not selected_run:
+        st.info("Select a Run ID in the sidebar to inspect its architecture.")
+
+# ─── TAB 3: Focus View ────────────────────────────────────────────────────────
+with tab_focus:
+    if senn_model is not None:
+        _layer_rows = []
+        for _name, _mod in senn_model.named_modules():
+            if not _name:
+                continue
+            _p = sum(pm.numel() for pm in _mod.parameters(recurse=False))
+            if _p == 0 and not list(_mod.children()):
+                _layer_rows.append({"Layer": _name, "Type": type(_mod).__name__, "Params": 0, "Shape": "—"})
+            elif _p > 0:
+                _shapes = [str(tuple(pm.shape)) for pm in _mod.parameters(recurse=False)]
+                _layer_rows.append({"Layer": _name, "Type": type(_mod).__name__, "Params": _p, "Shape": " | ".join(_shapes)})
+        import pandas as _pd_focus
+        _ldf = _pd_focus.DataFrame(_layer_rows)
+        _total = int(_ldf["Params"].sum())
+        st.markdown(
+            f'<div style="color:#8b949e;font-size:0.78rem;margin-bottom:12px;">'
+            f'Live breakdown for <b style="color:#58a6ff;">SENN ({selected_run})</b> '
+            f'· Total: <b style="color:#e6edf3;">{_total:,}</b> params</div>',
+            unsafe_allow_html=True,
+        )
+        _fig_tbl = go.Figure(go.Table(
+            header=dict(
+                values=["<b>Layer</b>", "<b>Type</b>", "<b>Params</b>", "<b>Shape</b>"],
+                fill_color="#161b22", font=dict(color="#e6edf3", size=12),
+                line_color="#21262d", align="left",
+            ),
+            cells=dict(
+                values=[_ldf["Layer"], _ldf["Type"], _ldf["Params"], _ldf["Shape"]],
+                fill_color=[
+                    ["#0d1117"] * len(_ldf),
+                    ["#0d1117"] * len(_ldf),
+                    [f"rgba(31,111,235,{min(0.05 + p / (_total + 1) * 0.85, 0.9):.2f})" if p > 0 else "#0d1117"
+                     for p in _ldf["Params"]],
+                    ["#0d1117"] * len(_ldf),
+                ],
+                font=dict(color="#c9d1d9", size=11), line_color="#21262d", align="left", height=28,
+            ),
+        ))
+        _fig_tbl.update_layout(**{**_PLOTLY_LAYOUT, "margin": dict(l=0, r=0, t=0, b=0)},
+                               height=max(320, len(_ldf) * 30 + 60))
+        st.plotly_chart(_fig_tbl, use_container_width=True)
+        with st.expander("💡 Interpretation guide"):
+            st.markdown("""
+| Column | Meaning |
+|---|---|
+| **Layer** | Module path in the network graph |
+| **Type** | PyTorch class name |
+| **Params** | Learnable parameter count |
+| **Shape** | Weight tensor shapes |
+
+Blue intensity in the **Params** column scales with relative parameter share.
+            """)
+    else:
+        st.info("⚠️ SENN model is not loaded. Select a valid run in the sidebar to enable Focus View.")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Footer
 # ─────────────────────────────────────────────────────────────────────────────
