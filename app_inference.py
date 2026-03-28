@@ -198,10 +198,11 @@ def load_baseline_model() -> tuple[nn.Module, int, str]:
 @st.cache_resource(show_spinner="Loading SENN model weights…")
 def load_senn_model(run_dir_name: str) -> tuple[Optional[nn.Module], int, str]:
     """
-    [ACTIVE: COLLABORATOR'S V2 PIPELINE]
-    Loads the retrained SENN model from `run_dir_name` inside outputs/.
-    Cache is keyed on `run_dir_name` so switching runs reloads automatically.
-    Uses 'best_architecture.json' for structure and 'best_model_retrained.pth' for weights.
+    [ACTIVE: V2 → V1 Fallback Pipeline]
+    Tries V2 artifacts first (best_architecture.json + best_model_retrained.pth).
+    Falls back silently to V1 artifacts (mutation_history.json + best_phase1_model.pth).
+    Hard-stops the app with st.error if neither route is viable or weights fail to load.
+    Cache is keyed on run_dir_name so switching runs reloads automatically.
     """
     try:
         from evolution.dna_builder import build_model_from_dna
@@ -210,101 +211,91 @@ def load_senn_model(run_dir_name: str) -> tuple[Optional[nn.Module], int, str]:
         run_dir = PROJECT_ROOT / "outputs" / run_dir_name
 
         if not run_dir.exists():
-            return None, 0, f"❌ Run directory not found: {run_dir_name}"
+            st.error(f"Run directory not found: {run_dir_name}")
+            st.stop()
 
-        # 1. Load Architecture Skeleton
-        arch_path = run_dir / "best_architecture.json"
-        if not arch_path.exists():
-            return None, 0, f"❌ Architecture JSON missing in {run_dir_name}"
+        # ── Path definitions ──────────────────────────────────────────────────────
+        v2_arch_path    = run_dir / "best_architecture.json"
+        v2_weights_path = run_dir / "best_model_retrained.pth"
+        v1_history_path = run_dir / "mutation_history.json"
+        v1_weights_path = run_dir / "best_phase1_model.pth"
 
-        dna_dict = json.loads(arch_path.read_text())
-        dna = ArchitectureDNA.from_dict(dna_dict)
-        model = build_model_from_dna(dna).to("cpu")
+        # ── V2 Route ─────────────────────────────────────────────────────────────
+        if v2_arch_path.exists() and v2_weights_path.exists():
+            dna_dict = json.loads(v2_arch_path.read_text())
+            dna      = ArchitectureDNA.from_dict(dna_dict)
+            model    = build_model_from_dna(dna).to("cpu")
 
-        # 2. Load Retrained Weights
-        weights_path = run_dir / "best_model_retrained.pth"
-        if not weights_path.exists():
-            return None, 0, f"❌ Weights file missing in {run_dir_name}"
+            state_dict = torch.load(v2_weights_path, map_location="cpu", weights_only=True)
+            clean_sd   = {(k[7:] if k.startswith("module.") else k): v for k, v in state_dict.items()}
+            model.load_state_dict(clean_sd, strict=False)
+            model.eval()
 
-        state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
+            n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            return model, n_params, "✅ Loaded V2 SENN (Retrained Architecture)"
 
-        # 3. Production-Grade Key Cleaning (Handling DataParallel 'module.' prefix)
-        clean_sd = {}
-        for k, v in state_dict.items():
-            # Strip 'module.' if present (common in DistributedDataParallel exports)
-            name = k[7:] if k.startswith("module.") else k
-            clean_sd[name] = v
+        # ── V1 Route ─────────────────────────────────────────────────────────────
+        elif v1_history_path.exists() and v1_weights_path.exists():
+            import dataclasses
+            history = json.loads(v1_history_path.read_text())
 
-        # Load with strict=False to handle minor naming variations gracefully
-        msg = model.load_state_dict(clean_sd, strict=False)
+            # Extract winning DNA: entry whose 'after' dict has the highest val_accuracy.
+            best_entry = max(
+                history,
+                key=lambda x: (
+                    x.get("after", {}).get("val_accuracy", -1)
+                    if isinstance(x.get("after"), dict)
+                    else -1
+                ),
+            )
+            dna_dict = best_entry["after"]
+            dna      = ArchitectureDNA.from_dict(dna_dict)
 
-        status = f"✅ Loaded: {run_dir_name}"
-        if msg.missing_keys:
-            status += f" [{len(msg.missing_keys)} keys missing]"
+            # Load checkpoint FIRST so we can read the ground-truth channel widths.
+            state_dict = torch.load(v1_weights_path, map_location="cpu", weights_only=True)
+            clean_sd   = {(k[7:] if k.startswith("module.") else k): v for k, v in state_dict.items()}
 
-        model.eval()
-        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        return model, n_params, status
+            # Extract the out_channels for every Conv2d layer inside `features`
+            # by reading the first dimension of each `features.N.weight` tensor.
+            # This makes the skeleton match the checkpoint exactly, irrespective of
+            # what channel counts the mutation history DNA recorded.
+            ckpt_conv_out_channels = [
+                v.shape[0]
+                for k, v in sorted(clean_sd.items())
+                if k.startswith("features.") and k.endswith(".weight") and v.dim() == 4
+            ]
 
-    except Exception as exc:
-        return None, 0, f"❌ Error loading SENN: {exc}"
+            if len(ckpt_conv_out_channels) == len(dna.conv_blocks):
+                # Reconstruct frozen ConvBlockDNA objects with checkpoint-truthful out_channels.
+                patched_blocks = [
+                    dataclasses.replace(block, out_channels=ckpt_out)
+                    for block, ckpt_out in zip(dna.conv_blocks, ckpt_conv_out_channels)
+                ]
+                dna = dataclasses.replace(dna, conv_blocks=patched_blocks)
+            # (If counts disagree, proceed with original DNA and let load_state_dict
+            #  report the mismatch via the outer except block.)
 
-# [TOGGLE: USER'S V1 PIPELINE ARTIFACTS]
-# @st.cache_resource(show_spinner="Loading best SENN model…")
-# def load_senn_model() -> tuple[Optional[nn.Module], int, str]:
-#     """
-#     Dynamically loads the best SENN architecture + weights from the latest
-#     outputs/run_<timestamp>/ directory, mirroring live_comparison.py logic.
-#     """
-#     try:
-#         from evolution.dna_builder import build_model_from_dna
-#         from evolution.dna_schema import ArchitectureDNA
-#         outputs = PROJECT_ROOT / "outputs"
-#         runs = sorted(
-#             [d for d in outputs.iterdir() if d.is_dir() and d.name.startswith("run_")],
-#             key=lambda p: p.name,
-#         )
-#         if not runs:
-#             return None, 0, "❌ No run directories found in outputs/"
-#         run_dir = runs[-1]
-#         dna_dict = None
-#         best_arch_file = run_dir / "best_architecture.json"
-#         if best_arch_file.exists():
-#             dna_dict = json.loads(best_arch_file.read_text())
-#         else:
-#             metrics_csv = run_dir / "metrics.csv"
-#             if metrics_csv.exists():
-#                 import csv as _csv
-#                 best_acc, best_id = -1.0, None
-#                 with open(metrics_csv) as f:
-#                     for row in _csv.DictReader(f):
-#                         try:
-#                             acc = float(row["val_accuracy"])
-#                             if acc > best_acc:
-#                                 best_acc, best_id = acc, row["arch_id"]
-#                         except (KeyError, ValueError):
-#                             continue
-#                 if best_id:
-#                     arch_path = run_dir / "population" / best_id / "arch.json"
-#                     if arch_path.exists():
-#                         dna_dict = json.loads(arch_path.read_text())
-#         if dna_dict is None:
-#             return None, 0, f"❌ Could not locate best architecture JSON in {run_dir}"
-#         dna   = ArchitectureDNA.from_dict(dna_dict)
-#         model = build_model_from_dna(dna).to("cpu")
-#         weights_path = run_dir / "best_phase1_model.pth"
-#         if weights_path.exists():
-#             model.load_state_dict(
-#                 torch.load(weights_path, map_location="cpu", weights_only=True)
-#             )
-#             status = f"✅ Loaded weights from `{run_dir.name}`"
-#         else:
-#             status = f"⚠️ No weights file found in {run_dir.name} — untrained model"
-#         model.eval()
-#         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-#         return model, n_params, status
-#     except Exception as exc:
-#         return None, 0, f"❌ Error loading SENN: {exc}"
+            model = build_model_from_dna(dna).to("cpu")
+            model.load_state_dict(clean_sd, strict=False)
+            model.eval()
+
+            n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            return model, n_params, "✅ Loaded V1 SENN (Evolutionary DNA)"
+
+        # ── Failure Route ───────────────────────────────────────────────────────────
+        else:
+            st.error(
+                f"Missing required model files for this run.\n\n"
+                f"Expected one of:\n"
+                f"  • V2: `best_architecture.json` + `best_model_retrained.pth`\n"
+                f"  • V1: `mutation_history.json` + `best_phase1_model.pth`\n\n"
+                f"Run directory: `outputs/{run_dir_name}`"
+            )
+            st.stop()
+
+    except Exception as e:
+        st.error(f"Failed to build model: {e}")
+        st.stop()
 # ─────────────────────────────────────────────────────────────────────────────
 # Inference helper
 # ─────────────────────────────────────────────────────────────────────────────
@@ -447,13 +438,14 @@ with st.sidebar:
         st.error("No run_* directories found in outputs/")
         selected_run = None
     else:
-        selected_run = st.selectbox(
-            "Select Run ID",
-            options=_available_runs,
-            index=0,   # newest is at index 0 after reverse-sort
-            help="Sorted newest → oldest. Switch runs to hot-swap the SENN model.",
-            label_visibility="collapsed",
-        )
+        #selected_run = st.selectbox(
+         #   "Select Run ID",
+          #  options=_available_runs,
+           # index=0,   # newest is at index 0 after reverse-sort
+            #help="Sorted newest → oldest. Switch runs to hot-swap the SENN model.",
+            #label_visibility="collapsed",
+        #)
+        selected_run = _available_runs[0] if _available_runs else None
 
     # ── Pre-flight file validation ─────────────────────────────────────────
     # Warn immediately if the selected folder is missing required artifacts,
