@@ -1,5 +1,9 @@
 # 🚀 SENN – Self-Evolving Neural Network
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://self-evolving-neural-network-v1.streamlit.app/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=flat&logo=PyTorch&logoColor=white)](https://pytorch.org/)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
+
 ## 📌 Overview
 
 **SENN (Self-Evolving Neural Network)** is a research-grade evolutionary framework that **automatically discovers, optimizes, and compresses convolutional neural network (CNN) architectures** for image classification.
@@ -51,7 +55,7 @@ SENN/
 ├── utils/              # Latency, FLOPs calculation, and pareto logic
 ├── main.py             # Entry point for evolution process
 ├── server.py           # FastAPI backend
-├── dashboard.py        # Streamlit dashboard
+├── app_inference.py        # Streamlit dashboard
 ├── export_onnx.py      # ONNX export utility
 └── config.py           # Global configuration
 ```
@@ -67,7 +71,7 @@ SENN/
 4. **Start API Server:**  
    `python server.py`
 5. **Launch Dashboard:**  
-   `streamlit run dashboard.py`
+   `streamlit run app_inference.py`
 
 ---
 
@@ -269,8 +273,9 @@ At the end of evolution:
 ## 📁 Outputs & Artifacts
 
 ### Model Files
-- `best_model.pth`  
-- `best_arch.json`  
+- `best_model_retrained.pth` (V2 Blueprint Models)
+- `best_phase1_model.pth` (V1 Legacy Models)
+- `best_architecture.json` (Deterministic Blueprint)
 
 ### Logs
 - `metrics.csv` — per-architecture metrics (val_accuracy, param_count, flops, latency)  
@@ -290,17 +295,18 @@ At the end of evolution:
 
 ---
 
-## 🖥️ Dashboard & Demo (Optional)
+## 🌐 Live MLOps Dashboard
 
-A **Streamlit dashboard** provides:
+Interact with the final converged model and explore the evolutionary telemetry in real-time:
+**[Launch SENN Streamlit Dashboard](https://self-evolving-neural-network-v1.streamlit.app/)**
 
-- Live evolution progress  
-- Best architecture summary  
-- Pareto front visualization  
-- Architecture comparison table  
-- Download links for models & DNA  
+The Streamlit dashboard transforms SENN from a research prototype into a production-grade inference system:
 
-This transforms SENN from a research prototype into a **usable system**.
+- **Live Head-to-Head Inference:** Benchmarks the evolved SENN architecture against an unregularized standard Baseline CNN. This deliberately demonstrates how traditional models suffer from *Network Bias Collapse* without strict human-engineered regularization, highlighting SENN's inherent architectural resilience.
+- **Evolution Trends:** Visualizes the generational telemetry data, tracking the genetic algorithm's trajectory as it maximizes accuracy while aggressively pruning parameter bloat.
+- **Architecture DNA:** A transparent, forensic JSON breakdown of the winning model's chromosomal structure, proving the automated topological decisions.
+- **Focus View:** A layer-by-layer parameter inspection tool that shatters the "black box" of AI, showing exactly where the algorithm chose to spend its parameter budget.
+- **Dynamic Fallback Integration:** Engineered to support both legacy pipeline runs (V1) and mature blueprint runs (V2) seamlessly.
 
 ---
 
@@ -374,8 +380,3 @@ Each run writes `outputs/run_*/search_cost.json`: `total_architectures_evaluated
 
 ### Phase 5 – Dashboard
 - Visualization & interaction
-
-
-
-
-
